@@ -143,7 +143,25 @@ html, body { height: 100%; width: 100%; overflow: hidden; font-family: 'DM Sans'
 .setting-input { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); outline: none; transition: border-color 0.15s; }
 .setting-input:focus { border-color: var(--text); }
 
-@media (max-width: 600px) {
+/* CONVERSATIONAL UI */
+.conv-area { flex: 1; overflow-y: auto; padding: 16px 20px 8px; min-height: 0; }
+.conv-messages { display: flex; flex-direction: column; gap: 12px; }
+.conv-msg { display: flex; gap: 10px; max-width: 100%; }
+.conv-msg.ai { align-self: flex-start; }
+.conv-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+.conv-bubble { padding: 10px 14px; border-radius: 16px; font-size: 14px; line-height: 1.6; max-width: 85%; }
+.conv-bubble.ai { background: var(--light); color: var(--text); border-radius: 4px 16px 16px 16px; }
+.conv-bubble.user { background: var(--text); color: #fff; border-radius: 16px 4px 16px 16px; }
+
+/* ORB */
+.orb { width: 80px; height: 80px; border-radius: 50%; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.3s; flex-shrink: 0; -webkit-tap-highlight-color: transparent; }
+.orb.idle { background: var(--text); }
+.orb.idle:hover { opacity: 0.85; }
+.orb.listening { background: var(--red); animation: orbpulse 1.2s infinite; }
+.orb.thinking { background: var(--teal-mid); }
+.orb.speaking { background: var(--teal); animation: orbwave 1.5s infinite; }
+@keyframes orbpulse { 0%,100%{box-shadow:0 0 0 0 rgba(192,57,43,.35)} 55%{box-shadow:0 0 0 18px rgba(192,57,43,0)} }
+@keyframes orbwave { 0%,100%{box-shadow:0 0 0 0 rgba(15,110,86,.3)} 50%{box-shadow:0 0 0 14px rgba(15,110,86,0)} }
   .sidebar { display: none; }
   .sidebar.mobile-open { display: flex; position: fixed; top: 0; left: 0; bottom: 0; z-index: 100; width: 80%; max-width: 280px; box-shadow: 4px 0 24px rgba(0,0,0,0.15); }
   .sec-name { font-size: 24px; }
@@ -257,13 +275,11 @@ function renderRecScreen(){
   const sec=sections[S.secIdx];
   const transcript=S.transcripts[sec.id]||'';
   const isLast=S.secIdx===sections.length-1;
-  const micState=S.isRecording?'recording':S.isProcessing?'processing':'idle';
-  const micIcon=S.isProcessing
-    ?`<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.08-5.96"/></svg>`
-    :S.isRecording
-    ?`<svg width="28" height="28" viewBox="0 0 24 24" fill="white"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`
-    :`<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
-  const micLabel=S.isRecording?'Recording — tap to stop':S.isProcessing?'Processing…':transcript?'Tap to add more':'Tap to record';
+  const convState=C.state; // idle|listening|thinking|speaking
+
+  // Determine orb appearance
+  const orbClass=convState==='listening'?'orb listening':convState==='thinking'?'orb thinking':convState==='speaking'?'orb speaking':'orb idle';
+  const statusText=convState==='listening'?'Listening…':convState==='thinking'?'Thinking…':convState==='speaking'?'Speaking…':C.started?'Tap to resume':'Tap to begin';
 
   document.getElementById('main').innerHTML=`
     <div style="display:flex;flex-direction:column;flex:1;overflow:hidden">
@@ -274,32 +290,43 @@ function renderRecScreen(){
       </div>
       <div class="rec-screen">
         <div class="prog-strip">${sections.map((s,i)=>`<div class="prog-seg${i<S.secIdx?' done':i===S.secIdx?' cur':''}" onclick="jumpTo(${i})" title="${s.label}"></div>`).join('')}</div>
-        <div class="sec-header">
-          <div class="sec-num">Section ${S.secIdx+1} of ${sections.length}</div>
-          <div class="sec-name">${esc(sec.label)}</div>
-          <div class="sec-prompt">${esc(sec.prompt)}</div>
+
+        <!-- Conversation display -->
+        <div class="conv-area" id="convArea">
+          <div class="conv-messages" id="convMessages"></div>
         </div>
-        <div class="transcript-area">
-          <textarea class="transcript-edit${S.isRecording?' recording':''}" id="transcriptEdit"
-            placeholder="Speak or type your reflection here…"
+
+        <!-- Transcript for this section -->
+        ${transcript?`
+        <div class="transcript-area" style="max-height:120px">
+          <textarea class="transcript-edit" id="transcriptEdit"
+            placeholder="Your transcript will appear here…"
             oninput="onTranscriptEdit()"
           >${esc(transcript)}</textarea>
-          <div class="transcript-hint">Tap anywhere to edit · Autosaves continuously</div>
-        </div>
+        </div>`:`<div id="transcriptEdit" style="display:none"></div>`}
+
+        <!-- Orb + controls -->
         <div class="controls">
-          <button class="mic-btn ${micState}" id="micBtn" onclick="toggleMic()">${micIcon}</button>
-          <div class="mic-label">${micLabel}</div>
-          ${S.isRecording?`<div class="voice-hint">Say "next section", "previous section", "skip section", or "pause recording"</div>`:''}
+          <div class="${orbClass}" id="mainOrb" onclick="orbTapped()">
+            ${convState==='thinking'?`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.08-5.96"/></svg>`
+            :convState==='listening'?`<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`
+            :convState==='speaking'?`<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`
+            :`<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`}
+          </div>
+          <div class="mic-label" id="orbLabel">${statusText}</div>
           <div class="nav-row">
-            <button class="nav-btn" onclick="goBack()" ${S.secIdx===0?'disabled':''}>← Back</button>
+            <button class="nav-btn" onclick="jumpTo(${Math.max(0,S.secIdx-1)})" ${S.secIdx===0?'disabled':''}>← Back</button>
             ${!isLast
-              ?`<button class="nav-btn skip" onclick="skipSection()">Skip</button><button class="nav-btn next" onclick="goNext()">Next →</button>`
-              :`<button class="export-btn" onclick="showExport()">Export reflection ↗</button>`
+              ?`<button class="nav-btn skip" onclick="skipConvSection()">Skip</button>`
+              :`<button class="export-btn" onclick="showExport()">Export ↗</button>`
             }
           </div>
         </div>
       </div>
     </div>`;
+
+  // Re-render conversation messages
+  renderConvMessages();
 }
 
 let saveTimer=null;
@@ -324,7 +351,9 @@ function openSession(id){
   const r=S.reflections.find(x=>x.id===id);if(!r)return;
   if(S.isRecording)stopRecording();
   releaseMic();
-  S.active=id;S.secIdx=r.secIdx||0;S.transcripts={...r.transcripts};sectionRawText='';
+  // Reset conversation
+  C.state='idle';C.messages=[];C.started=false;C.questionIdx=0;C.wrapUp=false;
+  S.active=id;S.secIdx=r.secIdx||0;S.transcripts={...r.transcripts};
   if(!S.transcripts.date)S.transcripts.date=today();
   S.isRecording=false;S.isProcessing=false;
   document.getElementById('sidebar').classList.remove('mobile-open');
@@ -365,252 +394,237 @@ function jumpTo(idx){
   S.secIdx=idx;allChunkText='';persistSession();renderRecScreen();
 }
 
-// ── VOICE ENGINE ──
-// Single continuous recording session per section.
-// One start, one stop, one Whisper upload.
-// State lock prevents overlapping sessions.
+// ════════════════════════════════
+// CONVERSATIONAL ENGINE
+// ════════════════════════════════
+const C={
+  state:'idle', // idle|listening|thinking|speaking
+  messages:[],
+  started:false,
+  silenceTimer:null,
+  mediaRec:null,
+  micStream:null,
+  mediaChunks:[],
+  recMime:'',
+  currentQuestion:null,
+  questionIdx:0,
+  wrapUp:false,
+};
 
-let micStream    = null;
-let mediaRec     = null;
-let mediaChunks  = [];
-let recMime      = '';
-let pendingCommand = null;
-let allChunkText = '';
+const SECTION_QUESTIONS={
+  title:['What would you like to call this reflection?'],
+  reaction:[
+    'Let\'s start with your reaction to the event. How did you feel in the moment — what were your immediate thoughts and emotions?',
+    'Was there anything that surprised you, or a moment of uncertainty you\'d like to describe?',
+  ],
+  analysis:[
+    'Now let\'s analyse what happened. What do you think you learned from this experience?',
+    'How does your clinical reasoning, or any frameworks you know, apply to what happened here?',
+  ],
+  planning:[
+    'Looking ahead — what would you do differently if you faced a similar situation?',
+    'What specific actions are you committing to as a result of this reflection, and in what timeframe?',
+  ],
+  overall:[
+    'Finally, stepping back — what does this experience tell you about your growth and development as a specialist physiotherapist?',
+  ],
+};
 
-// State lock — prevents double-start or processing overlap
-// S.isRecording and S.isProcessing already exist in S{}
+function getQs(secId){return SECTION_QUESTIONS[secId]||[`Tell me about your ${secId}.`];}
 
-function toggleMic(){
-  if(S.isProcessing) return; // locked — ignore tap during processing
-  if(S.isRecording) stopRecording();
-  else startRecording();
+function orbTapped(){
+  if(C.state==='speaking'){window.speechSynthesis.cancel();setState('idle');startListening();return;}
+  if(C.state==='listening'){clearTimeout(C.silenceTimer);finishListening();return;}
+  if(C.state==='thinking') return;
+  startConversation();
 }
 
-async function startRecording(){
-  if(S.isRecording||S.isProcessing) return; // state lock
+function setState(s){
+  C.state=s;
+  const orb=document.getElementById('mainOrb');
+  const lbl=document.getElementById('orbLabel');
+  if(!orb||!lbl)return;
+  orb.className='orb '+s;
+  lbl.textContent=s==='listening'?'Listening…':s==='thinking'?'Thinking…':s==='speaking'?'Speaking…':C.started?'Tap to resume':'Tap to begin';
+}
 
-  // Clean up any previous session fully before starting
-  if(mediaRec){try{mediaRec.stop();}catch(e){} mediaRec=null;}
-  if(micStream){micStream.getTracks().forEach(t=>t.stop()); micStream=null;}
-  mediaChunks=[];
-  pendingCommand=null;
+function addMsg(role,text){
+  C.messages.push({role,text});
+  renderConvMessages();
+}
 
-  // Seed accumulated text from existing section transcript
+function renderConvMessages(){
+  const el=document.getElementById('convMessages');
+  if(!el)return;
+  el.innerHTML=C.messages.slice(-20).map(m=>`<div class="conv-msg ${m.role}"><div class="conv-bubble ${m.role}">${esc(m.text)}</div></div>`).join('');
+  const area=document.getElementById('convArea');
+  if(area)area.scrollTop=area.scrollHeight;
+}
+
+function startConversation(){
+  C.started=true;C.wrapUp=false;
   const sec=activeSections()[S.secIdx];
-  allChunkText=S.transcripts[sec?.id]||'';
-
-  // Request mic — simple constraints only, no sampleRate
-  try{
-    micStream=await navigator.mediaDevices.getUserMedia({audio:true});
-  }catch(e){
-    alert('Microphone access denied. Please allow microphone access in Chrome settings.');
-    return;
-  }
-
-  // Safe MIME type detection
-  recMime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ?'audio/webm;codecs=opus'
-    :MediaRecorder.isTypeSupported('audio/webm')
-    ?'audio/webm'
-    :'';
-
-  // Build recorder — ondataavailable MUST be attached before start()
-  try{
-    mediaRec=new MediaRecorder(micStream, recMime?{mimeType:recMime}:{});
-  }catch(e){
-    micStream.getTracks().forEach(t=>t.stop()); micStream=null;
-    alert('Recording could not start. Please try again.');
-    return;
-  }
-
-  mediaChunks=[];
-  mediaRec.ondataavailable=e=>{
-    if(e.data&&e.data.size>0) mediaChunks.push(e.data);
-  };
-  mediaRec.onstop=onRecordingStop;
-
-  // Must be triggered by user gesture — this function is called from toggleMic (onclick)
-  mediaRec.start(100); // timeslice ensures data flows continuously
-
-  S.isRecording=true;
-  renderRecScreen();
-  setMicStatus('Recording — say "next section" to navigate');
-
-  // Start command polling loop
-  scheduleCommandCheck();
-}
-
-// ── COMMAND POLLING ──
-// Every 4 seconds, snapshot current chunks and check for voice commands via Whisper.
-// Does NOT stop or restart the main recorder — just reads chunks collected so far.
-
-let cmdTimer=null;
-let lastCheckedLength=0; // track how many chunks we've already sent for command checking
-
-function scheduleCommandCheck(){
-  clearTimeout(cmdTimer);
-  cmdTimer=setTimeout(checkForCommands, 4000);
-}
-
-async function checkForCommands(){
-  if(!S.isRecording||S.isProcessing||pendingCommand) return;
-
-  // Snapshot NEW chunks since last check
-  const newChunks=mediaChunks.slice(lastCheckedLength);
-  lastCheckedLength=mediaChunks.length;
-
-  if(!newChunks.length||!S.openaiKey||S.openaiKey==='skip'){
-    scheduleCommandCheck(); return;
-  }
-
-  const blob=new Blob(newChunks,{type:recMime||'audio/webm'});
-  if(blob.size<500){scheduleCommandCheck(); return;}
-
-  try{
-    const fd=new FormData(); fd.append('audio',blob,'audio.webm');
-    const res=await fetch('/api/transcribe',{
-      method:'POST',
-      headers:{'x-openai-key':S.openaiKey},
-      body:fd
-    });
-    if(res.ok){
-      const data=await res.json();
-      const said=(data.transcript||'').toLowerCase().trim();
-      for(const cmd of VOICE_COMMANDS){
-        if(said.includes(cmd)){
-          pendingCommand=cmd;
-          stopRecording(); // triggers full stop + transcription + navigation
-          return;
-        }
-      }
-    }
-  }catch(e){/* ignore — just poll again */}
-
-  scheduleCommandCheck();
-}
-
-function stopRecording(){
-  if(!S.isRecording&&!S.isProcessing) return;
-  clearTimeout(cmdTimer); cmdTimer=null;
-  S.isRecording=false;
-  S.isProcessing=true;
-  renderRecScreen();
-  setMicStatus('Processing…');
-
-  if(mediaRec&&mediaRec.state==='recording'){
-    mediaRec.stop(); // triggers onRecordingStop
+  if(!sec)return;
+  const existing=S.transcripts[sec.id]||'';
+  if(existing&&C.messages.length===0){
+    addMsg('user',existing);
+    askQuestion(`Welcome back. We were on ${sec.label}. Would you like to add anything, or shall we move on?`);
+  } else if(C.messages.length===0){
+    C.questionIdx=0;
+    askQuestion(getQs(sec.id)[0]);
   } else {
-    onRecordingStop();
+    startListening();
   }
 }
 
-async function onRecordingStop(){
-  // Collect all chunks into one blob
-  if(!mediaChunks.length){
-    releaseMic();
-    S.isProcessing=false;
-    renderRecScreen();
-    return;
+function askQuestion(text){
+  C.currentQuestion=text;
+  addMsg('ai',text);
+  setState('speaking');
+  speak(text,()=>setTimeout(()=>startListening(),400));
+}
+
+async function startListening(){
+  if(C.state==='listening')return;
+  setState('listening');
+  if(!C.micStream){
+    try{C.micStream=await navigator.mediaDevices.getUserMedia({audio:true});}
+    catch(e){addMsg('ai','I couldn\'t access your microphone. Please check your settings.');setState('idle');return;}
   }
+  C.recMime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':MediaRecorder.isTypeSupported('audio/webm')?'audio/webm':'';
+  C.mediaChunks=[];
+  try{
+    C.mediaRec=new MediaRecorder(C.micStream,C.recMime?{mimeType:C.recMime}:{});
+    C.mediaRec.ondataavailable=e=>{if(e.data&&e.data.size>0){C.mediaChunks.push(e.data);resetSilenceTimer();}};
+    C.mediaRec.onstop=processUserSpeech;
+    C.mediaRec.start(100);
+  }catch(e){setState('idle');return;}
+  resetSilenceTimer();
+}
 
-  const blob=new Blob(mediaChunks,{type:recMime||'audio/webm'});
-  mediaChunks=[];
+function resetSilenceTimer(){
+  clearTimeout(C.silenceTimer);
+  C.silenceTimer=setTimeout(finishListening,2500);
+}
 
-  // Send full recording to Whisper once
-  let whisperText='';
-  if(S.openaiKey&&S.openaiKey!=='skip'&&blob.size>800){
-    try{
-      const fd=new FormData(); fd.append('audio',blob,'audio.webm');
-      const res=await fetch('/api/transcribe',{
-        method:'POST',
-        headers:{'x-openai-key':S.openaiKey},
-        body:fd
-      });
-      if(res.ok){
-        const data=await res.json();
-        whisperText=(data.transcript||'').trim();
-        // Strip any command phrases Whisper caught
-        for(const cmd of VOICE_COMMANDS){
-          whisperText=whisperText.replace(new RegExp(cmd+'[.,!?]?\\s*','gi'),'').trim();
-        }
-      }
-    }catch(e){/* whisper failed — use empty */}
+function finishListening(){
+  clearTimeout(C.silenceTimer);
+  if(C.mediaRec&&C.mediaRec.state==='recording')C.mediaRec.stop();
+}
+
+async function processUserSpeech(){
+  setState('thinking');
+  const blob=new Blob(C.mediaChunks,{type:C.recMime||'audio/webm'});
+  C.mediaChunks=[];
+  if(blob.size<500){
+    const nudge='I didn\'t catch that — take your time whenever you\'re ready.';
+    addMsg('ai',nudge);setState('speaking');speak(nudge,()=>setTimeout(()=>startListening(),400));return;
   }
-
-  // Append to section transcript
-  if(whisperText){
-    allChunkText=allChunkText?allChunkText.trimEnd()+' '+whisperText:whisperText;
-    const sec=activeSections()[S.secIdx];
-    if(sec){
-      S.transcripts[sec.id]=allChunkText;
-      persistSession();
-    }
+  let userText='';
+  try{
+    const fd=new FormData();fd.append('audio',blob,'audio.webm');
+    const res=await fetch('/api/transcribe',{method:'POST',headers:{'x-openai-key':S.openaiKey},body:fd});
+    if(res.ok){const d=await res.json();userText=(d.transcript||'').trim();}
+  }catch(e){}
+  if(!userText){
+    const nudge='Sorry, I didn\'t catch that — could you say that again?';
+    addMsg('ai',nudge);setState('speaking');speak(nudge,()=>setTimeout(()=>startListening(),400));return;
   }
-
-  releaseMic();
-  S.isProcessing=false;
-
-  if(pendingCommand){
-    executeCommand();
-  } else {
-    renderRecScreen();
+  addMsg('user',userText);
+  const sec=activeSections()[S.secIdx];
+  if(sec){
+    const ex=S.transcripts[sec.id]||'';
+    S.transcripts[sec.id]=ex?ex.trimEnd()+' '+userText:userText;
     const ta=document.getElementById('transcriptEdit');
-    const sec=activeSections()[S.secIdx];
-    if(ta&&sec) ta.value=S.transcripts[sec.id]||'';
+    if(ta)ta.value=S.transcripts[sec.id];
+    persistSession();
+  }
+  await evaluateAndRespond(userText,sec);
+}
+
+async function evaluateAndRespond(userText,sec){
+  if(!sec)return;
+  if(C.wrapUp){
+    const lower=userText.toLowerCase();
+    const secs=activeSections();
+    const match=secs.find(s=>lower.includes(s.label.toLowerCase()));
+    if(match&&(lower.includes('add')||lower.includes('yes')||lower.includes('back')||lower.includes('revisit'))){
+      S.secIdx=secs.indexOf(match);C.messages=[];C.questionIdx=0;C.wrapUp=false;
+      persistSession();renderRecScreen();
+      askQuestion(`Of course — back to ${match.label}. ${getQs(match.id)[0]}`);
+    } else {
+      releaseMic();setState('idle');
+      addMsg('ai','Your reflection is complete. Tap Export to save it.');
+      speak('Your reflection is complete. Tap Export to save it to Google Docs.',()=>setState('idle'));
+      const r=getActive();if(r){r.done=true;saveState();renderSidebar();}
+    }
+    return;
+  }
+  let sufficient=userText.split(' ').length>10;
+  let aiPrompt='';
+  if(S.anthropicKey&&S.anthropicKey!=='skip'){
+    try{
+      const res=await fetch('/api/evaluate',{method:'POST',
+        headers:{'Content-Type':'application/json','x-anthropic-key':S.anthropicKey},
+        body:JSON.stringify({question:C.currentQuestion,answer:userText,section:sec.label})});
+      if(res.ok){const d=await res.json();sufficient=d.sufficient;aiPrompt=d.prompt||'';}
+    }catch(e){}
+  }
+  if(!sufficient&&aiPrompt){
+    addMsg('ai',aiPrompt);setState('speaking');speak(aiPrompt,()=>setTimeout(()=>startListening(),400));return;
+  }
+  const qs=getQs(sec.id);
+  C.questionIdx++;
+  if(C.questionIdx<qs.length){
+    askQuestion(qs[C.questionIdx]);
+  } else {
+    const sections=activeSections();
+    if(S.secIdx<sections.length-1){
+      S.secIdx++;C.messages=[];C.questionIdx=0;persistSession();renderRecScreen();
+      askQuestion(getQs(activeSections()[S.secIdx].id)[0]);
+    } else {
+      C.wrapUp=true;
+      const wrapMsg='That covers all sections. Is there anything you\'d like to add to any section — reaction, analysis, planning, or overall?';
+      addMsg('ai',wrapMsg);setState('speaking');speak(wrapMsg,()=>setTimeout(()=>startListening(),400));
+    }
   }
 }
 
-function releaseMic(){
-  clearTimeout(cmdTimer); cmdTimer=null;
-  lastCheckedLength=0;
-  if(micStream){micStream.getTracks().forEach(t=>t.stop()); micStream=null;}
-  mediaRec=null;
+function skipConvSection(){
+  const secs=activeSections();
+  if(S.secIdx<secs.length-1){
+    S.secIdx++;C.messages=[];C.questionIdx=0;C.wrapUp=false;persistSession();renderRecScreen();
+    askQuestion(getQs(activeSections()[S.secIdx].id)[0]);
+  }
 }
 
-function speakSection(label){
-  if(!window.speechSynthesis)return;
+function speak(text,onEnd){
+  if(!window.speechSynthesis){if(onEnd)onEnd();return;}
   window.speechSynthesis.cancel();
-  const utt=new SpeechSynthesisUtterance(label);
-  utt.lang='en-AU'; utt.rate=0.95; utt.volume=1;
+  const utt=new SpeechSynthesisUtterance(text);
+  utt.lang='en-AU';utt.rate=1.0;utt.pitch=1.0;utt.volume=1;
+  const voices=window.speechSynthesis.getVoices();
+  const pref=voices.find(v=>v.lang.startsWith('en')&&(v.name.includes('Google')||v.name.includes('Natural')||v.name.includes('Neural')));
+  if(pref)utt.voice=pref;
+  utt.onend=()=>{if(onEnd)onEnd();};
+  utt.onerror=()=>{if(onEnd)onEnd();};
   window.speechSynthesis.speak(utt);
 }
 
-function executeCommand(){
-  const cmd=pendingCommand;
-  pendingCommand=null;
-
-  if(cmd==='pause recording'||cmd==='stop recording'){
-    S.isRecording=false;
-    renderRecScreen();
-    return;
-  }
-
-  const secs=activeSections();
-  if(cmd==='next section'&&S.secIdx<secs.length-1) S.secIdx++;
-  else if(cmd==='previous section'&&S.secIdx>0) S.secIdx--;
-  else if(cmd==='skip section'&&S.secIdx<secs.length-1) S.secIdx++;
-
-  persistSession();
-  allChunkText=''; // reset for new section
-  renderRecScreen();
-
-  const newSec=activeSections()[S.secIdx];
-  if(newSec) speakSection(newSec.label);
-
-  if(S.isRecording){
-    setTimeout(()=>startRecording(), 1400);
-  }
+function releaseMic(){
+  clearTimeout(C.silenceTimer);
+  if(C.mediaRec){try{C.mediaRec.stop();}catch(e){}C.mediaRec=null;}
+  if(C.micStream){C.micStream.getTracks().forEach(t=>t.stop());C.micStream=null;}
+  C.mediaChunks=[];
 }
 
-function updateTextarea(text){
-  const ta=document.getElementById('transcriptEdit');
-  if(ta&&document.activeElement!==ta) ta.value=text;
-}
-
-function setMicStatus(msg){
-  const el=document.getElementById('micLabel');
-  if(el) el.textContent=msg;
-}
+// Stubs to avoid errors from remaining references
+let allChunkText='';
+function toggleMic(){}
+function stopRecording(){releaseMic();C.state='idle';setState('idle');}
+function speakSection(){}
+function setMicStatus(){}
+function updateTextarea(){}
 
 async function cleanTranscript(raw){
   if(!raw?.trim())return raw;

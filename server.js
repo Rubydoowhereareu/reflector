@@ -94,7 +94,49 @@ Cleaning rules:
   }
 });
 
-// Serve app for all other routes (SPA)
+// Evaluate whether user's answer is sufficient for the question
+app.post('/api/evaluate', async (req, res) => {
+  const anthropicKey = req.headers['x-anthropic-key'];
+  if (!anthropicKey) return res.status(400).json({ error: 'No Anthropic key' });
+  const { question, answer, section } = req.body;
+  if (!question || !answer) return res.status(400).json({ sufficient: true });
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': anthropicKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        system: `You are assessing whether a physiotherapy specialist's spoken reflection answer is sufficient for the question asked.
+
+Return ONLY valid JSON: {"sufficient": true/false, "prompt": "follow-up question if not sufficient"}
+
+Rules:
+- sufficient=true if the answer has meaningful content (more than 2-3 sentences or ~30 words)
+- sufficient=false if the answer is very brief, vague, or clearly incomplete
+- If sufficient=false, prompt should be a single natural spoken follow-up question to draw out more depth
+- Never be harsh — keep prompts warm and curious
+- If sufficient=true, prompt can be empty string`,
+        messages: [{ role: 'user', content: `Section: ${section}\nQuestion: ${question}\nAnswer: ${answer}\n\nAssess:` }],
+      }),
+    });
+    if (!response.ok) return res.json({ sufficient: true, prompt: '' });
+    const data = await response.json();
+    const text = data.content?.[0]?.text || '{}';
+    const clean = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    res.json({ sufficient: parsed.sufficient !== false, prompt: parsed.prompt || '' });
+  } catch (e) {
+    res.json({ sufficient: true, prompt: '' });
+  }
+});
+
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
