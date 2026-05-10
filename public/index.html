@@ -386,18 +386,23 @@ function toggleMic(){if(S.isRecording)stopRecording();else startRecording();}
 async function startRecording(){
   // Clean up
   clearTimeout(chunkTimer);chunkTimer=null;
-  if(mediaRec){try{mediaRec.stop();}catch(e){}mediaRec=null;}
+  if(mediaRec&&mediaRec.state==='recording'){try{mediaRec.stop();}catch(e){}}
+  mediaRec=null;
   if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}
   mediaChunks=[];
-  allChunkText='';
   pendingCommand=null;
 
+  // Only reset accumulated text if starting fresh (not after navigation)
+  const sec=activeSections()[S.secIdx];
+  if(!allChunkText){
+    allChunkText=S.transcripts[sec?.id]||'';
+  }
+
   try{
-    micStream=await navigator.mediaDevices.getUserMedia({
-      audio:{echoCancellation:true,noiseSuppression:true,sampleRate:16000}
-    });
+    // Simple constraints — avoid sampleRate which breaks on some Android devices
+    micStream=await navigator.mediaDevices.getUserMedia({audio:true});
   }catch(e){
-    alert('Microphone access denied. Please allow microphone access and try again.');
+    alert('Microphone access denied. Please allow microphone access in Chrome settings and try again.');
     return;
   }
 
@@ -405,9 +410,6 @@ async function startRecording(){
     .find(t=>MediaRecorder.isTypeSupported(t))||'';
 
   S.isRecording=true;
-  // Seed allChunkText with any existing transcript for this section
-  const sec=activeSections()[S.secIdx];
-  allChunkText=S.transcripts[sec?.id]||'';
   renderRecScreen();
   setMicStatus('Recording — say "next section" to navigate');
 
