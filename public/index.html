@@ -598,16 +598,41 @@ function skipConvSection(){
   }
 }
 
-function speak(text,onEnd){
-  if(!window.speechSynthesis){if(onEnd)onEnd();return;}
+function speak(text, onEnd){
+  // Use OpenAI TTS if key available — much better quality
+  if(S.openaiKey && S.openaiKey !== 'skip'){
+    fetch('/api/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-openai-key': S.openaiKey },
+      body: JSON.stringify({ text, voice: 'nova' }),
+    })
+    .then(res => {
+      if(!res.ok) throw new Error('TTS failed');
+      return res.blob();
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => { URL.revokeObjectURL(url); if(onEnd) onEnd(); };
+      audio.onerror = () => { URL.revokeObjectURL(url); if(onEnd) onEnd(); };
+      audio.play().catch(() => { if(onEnd) onEnd(); });
+    })
+    .catch(() => speakFallback(text, onEnd));
+    return;
+  }
+  speakFallback(text, onEnd);
+}
+
+function speakFallback(text, onEnd){
+  if(!window.speechSynthesis){ if(onEnd) onEnd(); return; }
   window.speechSynthesis.cancel();
-  const utt=new SpeechSynthesisUtterance(text);
-  utt.lang='en-AU';utt.rate=1.0;utt.pitch=1.0;utt.volume=1;
-  const voices=window.speechSynthesis.getVoices();
-  const pref=voices.find(v=>v.lang.startsWith('en')&&(v.name.includes('Google')||v.name.includes('Natural')||v.name.includes('Neural')));
-  if(pref)utt.voice=pref;
-  utt.onend=()=>{if(onEnd)onEnd();};
-  utt.onerror=()=>{if(onEnd)onEnd();};
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang = 'en-AU'; utt.rate = 1.0; utt.pitch = 1.0; utt.volume = 1;
+  const voices = window.speechSynthesis.getVoices();
+  const pref = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Neural')));
+  if(pref) utt.voice = pref;
+  utt.onend = () => { if(onEnd) onEnd(); };
+  utt.onerror = () => { if(onEnd) onEnd(); };
   window.speechSynthesis.speak(utt);
 }
 

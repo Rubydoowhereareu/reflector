@@ -137,6 +137,25 @@ Rules:
 });
 
 
+// OpenAI Text-to-Speech
+app.post('/api/speak', async (req, res) => {
+  const openaiKey = req.headers['x-openai-key'];
+  if (!openaiKey) return res.status(400).json({ error: 'No OpenAI key' });
+  const { text, voice } = req.body;
+  if (!text) return res.status(400).json({ error: 'No text' });
+  try {
+    const response = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+      body: JSON.stringify({ model: 'tts-1', input: text, voice: voice || 'nova', response_format: 'mp3' }),
+    });
+    if (!response.ok) { const e = await response.json(); return res.status(response.status).json({ error: e.error?.message }); }
+    const buffer = await response.arrayBuffer();
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(Buffer.from(buffer));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
