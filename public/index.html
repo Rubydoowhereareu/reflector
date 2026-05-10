@@ -398,10 +398,11 @@ function jumpTo(idx){
 // CONVERSATIONAL ENGINE
 // ════════════════════════════════
 const C={
-  state:'idle', // idle|listening|thinking|speaking
+  state:'idle',
   messages:[],
   started:false,
   silenceTimer:null,
+  lastChunkTime:0,
   mediaRec:null,
   micStream:null,
   mediaChunks:[],
@@ -493,22 +494,32 @@ async function startListening(){
   }
   C.recMime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':MediaRecorder.isTypeSupported('audio/webm')?'audio/webm':'';
   C.mediaChunks=[];
+  C.lastChunkTime=Date.now();
   try{
     C.mediaRec=new MediaRecorder(C.micStream,C.recMime?{mimeType:C.recMime}:{});
-    C.mediaRec.ondataavailable=e=>{if(e.data&&e.data.size>0){C.mediaChunks.push(e.data);resetSilenceTimer();}};
+    C.mediaRec.ondataavailable=e=>{
+      if(e.data&&e.data.size>0){
+        C.mediaChunks.push(e.data);
+        C.lastChunkTime=Date.now(); // update last time we got audio
+      }
+    };
     C.mediaRec.onstop=processUserSpeech;
-    C.mediaRec.start(100);
+    C.mediaRec.start(250); // fire dataavailable every 250ms
   }catch(e){setState('idle');return;}
-  resetSilenceTimer();
+
+  // Silence detection: poll every 200ms, stop if no new audio for 1 second
+  C.silenceTimer=setInterval(()=>{
+    if(Date.now()-C.lastChunkTime > 1000){
+      finishListening();
+    }
+  }, 200);
 }
 
-function resetSilenceTimer(){
-  clearTimeout(C.silenceTimer);
-  C.silenceTimer=setTimeout(finishListening,2500);
-}
+function resetSilenceTimer(){} // no longer used but kept to avoid errors
 
 function finishListening(){
-  clearTimeout(C.silenceTimer);
+  clearInterval(C.silenceTimer);
+  C.silenceTimer=null;
   if(C.mediaRec&&C.mediaRec.state==='recording')C.mediaRec.stop();
 }
 
@@ -637,7 +648,8 @@ function speakFallback(text, onEnd){
 }
 
 function releaseMic(){
-  clearTimeout(C.silenceTimer);
+  clearInterval(C.silenceTimer);
+  C.silenceTimer=null;
   if(C.mediaRec){try{C.mediaRec.stop();}catch(e){}C.mediaRec=null;}
   if(C.micStream){C.micStream.getTracks().forEach(t=>t.stop());C.micStream=null;}
   C.mediaChunks=[];
