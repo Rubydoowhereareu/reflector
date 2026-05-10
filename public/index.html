@@ -376,7 +376,7 @@ let chunkTimer = null;      // fires every CHUNK_MS to rotate chunk
 let pendingNav = null;      // navigation to execute after current chunk processes
 let autoRestart = false;    // whether to auto-restart after processing
 
-const CHUNK_MS = 10000;     // 10 second chunks
+const CHUNK_MS = 5000;     // 5 second chunks
 
 function toggleMic(){if(S.isRecording)stopRecording(false);else startRecording();}
 
@@ -490,10 +490,15 @@ async function processChunk(chunks,mime){
       persistSession();
     }
 
-    // Update textarea if still on same section
+    // Update textarea if still on same section — but don't steal focus
     if(S.secIdx===secIdxAtRecord){
       const ta=document.getElementById('transcriptEdit');
-      if(ta)ta.value=S.transcripts[sec.id]||'';
+      if(ta&&document.activeElement!==ta){
+        ta.value=S.transcripts[sec.id]||'';
+      } else if(ta){
+        // User is actively editing — just keep state in sync, don't overwrite cursor
+        S.transcripts[sec.id]=ta.value;
+      }
     }
 
     // Handle command or continue
