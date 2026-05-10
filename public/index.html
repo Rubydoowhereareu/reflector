@@ -373,11 +373,10 @@ function jumpTo(idx){
 // - Text appears after each recording session ends (Whisper quality, not live)
 // - One button tap to start; fully hands-free from there
 
-let micStream    = null;   // shared mic stream
-let mediaRec     = null;   // captures audio for Whisper
+let micStream    = null;
+let mediaRec     = null;
 let mediaChunks  = [];
 let recMime      = '';
-let cmdRec       = null;   // lightweight Web Speech for commands only
 let pendingCommand = null;
 
 function toggleMic(){if(S.isRecording)stopRecording();else startRecording();}
@@ -414,51 +413,66 @@ async function startRecording(){
   renderRecScreen();
   setMicStatus('Recording — say "next section" to navigate');
 
-  // Start command listener separately
-  startCmdListener();
+  // Start periodic command detection using Whisper
+  startCommandPolling();
 }
 
-function startCmdListener(){
-  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(!SR)return; // no Web Speech — commands only work via Whisper on stop
+let cmdPollTimer = null;
+let cmdChunks = [];      // separate short chunks just for command detection
+let cmdRec2 = null;      // second recorder on same stream for command polling
 
-  cmdRec=new SR();
-  cmdRec.continuous=true;
-  cmdRec.interimResults=false; // finals only — faster and more reliable
-  cmdRec.lang='en-AU';
-  cmdRec.maxAlternatives=1;
+function startCommandPolling(){
+  // Every 6 seconds, grab a small audio sample and check for commands via Whisper
+  // Uses the same mic stream — no permission conflict
+  startCmdChunk();
+}
 
-  cmdRec.onresult=(e)=>{
-    if(!S.isRecording)return;
-    const said=e.results[e.results.length-1][0].transcript.toLowerCase().trim();
-    for(const cmd of VOICE_COMMANDS){
-      if(said.includes(cmd)){
-        pendingCommand=cmd;
-        triggerCommandStop();
-        return;
+function startCmdChunk(){
+  if(!S.isRecording||!micStream)return;
+  cmdChunks=[];
+  try{
+    cmdRec2=new MediaRecorder(micStream,recMime?{mimeType:recMime}:{});
+    cmdRec2.ondataavailable=e=>{if(e.data&&e.data.size>0)cmdChunks.push(e.data);};
+    cmdRec2.onstop=checkCmdChunk;
+    cmdRec2.start(200);
+    cmdPollTimer=setTimeout(()=>{
+      if(cmdRec2&&cmdRec2.state==='recording')cmdRec2.stop();
+    },3000);
+  }catch(e){/* command polling unavailable */}
+}
+
+async function checkCmdChunk(){
+  if(!S.isRecording||pendingCommand)return;
+  const blob=new Blob(cmdChunks,{type:recMime||'audio/webm'});
+  if(blob.size>500&&S.openaiKey&&S.openaiKey!=='skip'){
+    try{
+      const fd=new FormData();fd.append('audio',blob,'audio.webm');
+      const res=await fetch('/api/transcribe',{method:'POST',headers:{'x-openai-key':S.openaiKey},body:fd});
+      if(res.ok){
+        const data=await res.json();
+        const said=(data.transcript||'').toLowerCase();
+        for(const cmd of VOICE_COMMANDS){
+          if(said.includes(cmd)){
+            pendingCommand=cmd;
+            triggerCommandStop();
+            return;
+          }
+        }
       }
-    }
-  };
-
-  cmdRec.onerror=()=>{}; // silent — command listener errors are non-fatal
-
-  cmdRec.onend=()=>{
-    // Auto-restart command listener while recording
-    if(S.isRecording&&!pendingCommand){
-      try{cmdRec.start();}catch(e){}
-    }
-  };
-
-  try{cmdRec.start();}catch(e){}
+    }catch(e){}
+  }
+  // No command found — poll again
+  if(S.isRecording&&!pendingCommand)startCmdChunk();
 }
 
-function stopCmdListener(){
-  if(cmdRec){try{cmdRec.abort();}catch(e){}cmdRec=null;}
+function stopCommandPolling(){
+  clearTimeout(cmdPollTimer);cmdPollTimer=null;
+  if(cmdRec2){try{cmdRec2.stop();}catch(e){}cmdRec2=null;}
+  cmdChunks=[];
 }
 
 function triggerCommandStop(){
-  // Command detected — stop everything and process
-  stopCmdListener();
+  stopCommandPolling();
   if(mediaRec&&mediaRec.state==='recording'){
     S.isProcessing=true;
     renderRecScreen();
@@ -471,10 +485,9 @@ function triggerCommandStop(){
 }
 
 function stopRecording(){
-  // Manual stop
   S.isRecording=false;
   pendingCommand=null;
-  stopCmdListener();
+  stopCommandPolling();
   if(mediaRec&&mediaRec.state==='recording'){
     S.isProcessing=true;
     renderRecScreen();
