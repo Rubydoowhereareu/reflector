@@ -366,132 +366,179 @@ function jumpTo(idx){
 }
 
 // ── VOICE ENGINE ──
-// Architecture:
-// - MediaRecorder captures full audio → sent to Whisper on stop (authoritative transcript)
-// - A separate lightweight Web Speech instance listens ONLY for command keywords
-// - Commands trigger: stop MediaRecorder → Whisper → navigate → restart
-// - Text appears after each recording session ends (Whisper quality, not live)
-// - One button tap to start; fully hands-free from there
+// Single MediaRecorder rotates every 4 seconds.
+// Each chunk is sent to Whisper — if a command is detected, navigate.
+// If no command, append transcript and start next chunk.
+// One mic, one recorder, no conflicts.
 
 let micStream    = null;
 let mediaRec     = null;
 let mediaChunks  = [];
 let recMime      = '';
 let pendingCommand = null;
+let allChunkText = '';   // accumulated transcript text for this section recording
+
+const CMD_CHUNK_MS = 4000; // rotate every 4 seconds
+let chunkTimer = null;
 
 function toggleMic(){if(S.isRecording)stopRecording();else startRecording();}
 
 async function startRecording(){
-  // Clean up previous session
-  stopCmdListener();
-  if(mediaRec&&mediaRec.state==='recording'){try{mediaRec.stop();}catch(e){}}
+  // Clean up
+  clearTimeout(chunkTimer);chunkTimer=null;
+  if(mediaRec){try{mediaRec.stop();}catch(e){}mediaRec=null;}
   if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}
   mediaChunks=[];
+  allChunkText='';
+  pendingCommand=null;
 
   try{
-    micStream=await navigator.mediaDevices.getUserMedia({audio:true,echoCancellation:true,noiseSuppression:true});
+    micStream=await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:true,noiseSuppression:true,sampleRate:16000}
+    });
   }catch(e){
     alert('Microphone access denied. Please allow microphone access and try again.');
     return;
   }
 
-  // Main recorder — full quality audio for Whisper
   recMime=['audio/webm;codecs=opus','audio/webm','audio/ogg','audio/mp4']
     .find(t=>MediaRecorder.isTypeSupported(t))||'';
-  try{
-    mediaRec=new MediaRecorder(micStream,recMime?{mimeType:recMime}:{});
-    mediaChunks=[];
-    mediaRec.ondataavailable=e=>{if(e.data&&e.data.size>0)mediaChunks.push(e.data);};
-    mediaRec.start(200);
-  }catch(e){
-    alert('Recording failed to start. Please try again.');
-    micStream.getTracks().forEach(t=>t.stop());micStream=null;
-    return;
-  }
 
   S.isRecording=true;
+  // Seed allChunkText with any existing transcript for this section
+  const sec=activeSections()[S.secIdx];
+  allChunkText=S.transcripts[sec?.id]||'';
   renderRecScreen();
   setMicStatus('Recording — say "next section" to navigate');
 
-  // Start periodic command detection using Whisper
-  startCommandPolling();
+  startChunk();
 }
 
-let cmdPollTimer = null;
-let cmdChunks = [];      // separate short chunks just for command detection
-let cmdRec2 = null;      // second recorder on same stream for command polling
-
-function startCommandPolling(){
-  // Every 6 seconds, grab a small audio sample and check for commands via Whisper
-  // Uses the same mic stream — no permission conflict
-  startCmdChunk();
-}
-
-function startCmdChunk(){
+function startChunk(){
   if(!S.isRecording||!micStream)return;
-  cmdChunks=[];
+  mediaChunks=[];
   try{
-    cmdRec2=new MediaRecorder(micStream,recMime?{mimeType:recMime}:{});
-    cmdRec2.ondataavailable=e=>{if(e.data&&e.data.size>0)cmdChunks.push(e.data);};
-    cmdRec2.onstop=checkCmdChunk;
-    cmdRec2.start(200);
-    cmdPollTimer=setTimeout(()=>{
-      if(cmdRec2&&cmdRec2.state==='recording')cmdRec2.stop();
-    },3000);
-  }catch(e){/* command polling unavailable */}
+    mediaRec=new MediaRecorder(micStream,recMime?{mimeType:recMime}:{});
+    mediaRec.ondataavailable=e=>{if(e.data&&e.data.size>0)mediaChunks.push(e.data);};
+    mediaRec.onstop=processChunk;
+    mediaRec.start(100);
+    // Auto-rotate after CMD_CHUNK_MS
+    chunkTimer=setTimeout(()=>{
+      if(mediaRec&&mediaRec.state==='recording')mediaRec.stop();
+    },CMD_CHUNK_MS);
+  }catch(e){
+    S.isRecording=false;renderRecScreen();
+  }
 }
 
-async function checkCmdChunk(){
-  if(!S.isRecording||pendingCommand)return;
-  const blob=new Blob(cmdChunks,{type:recMime||'audio/webm'});
-  if(blob.size>500&&S.openaiKey&&S.openaiKey!=='skip'){
+async function processChunk(){
+  clearTimeout(chunkTimer);chunkTimer=null;
+  if(!S.isRecording&&!pendingCommand){
+    // Manual stop — do final save
+    await finalSave();
+    return;
+  }
+
+  const blob=new Blob(mediaChunks,{type:recMime||'audio/webm'});
+  mediaChunks=[];
+
+  if(blob.size<800){
+    // Too short — just continue
+    if(S.isRecording&&!pendingCommand)startChunk();
+    return;
+  }
+
+  // Send to Whisper
+  try{
+    const fd=new FormData();fd.append('audio',blob,'audio.webm');
+    const res=await fetch('/api/transcribe',{
+      method:'POST',
+      headers:{'x-openai-key':S.openaiKey},
+      body:fd
+    });
+    if(!res.ok)throw new Error();
+    const data=await res.json();
+    let chunkText=(data.transcript||'').trim();
+
+    // Check for commands
+    let foundCmd=null;
+    const lower=chunkText.toLowerCase();
+    for(const cmd of VOICE_COMMANDS){
+      if(lower.includes(cmd)){
+        foundCmd=cmd;
+        chunkText=chunkText.replace(new RegExp(cmd+'[.,!?]?\\s*','gi'),'').trim();
+        break;
+      }
+    }
+
+    // Append chunk text to section
+    if(chunkText){
+      allChunkText=allChunkText?allChunkText.trimEnd()+' '+chunkText:chunkText;
+      const sec=activeSections()[S.secIdx];
+      if(sec){
+        S.transcripts[sec.id]=allChunkText;
+        persistSession();
+        // Update textarea if not being edited
+        const ta=document.getElementById('transcriptEdit');
+        if(ta&&document.activeElement!==ta)ta.value=allChunkText;
+      }
+    }
+
+    if(foundCmd){
+      pendingCommand=foundCmd;
+      S.isProcessing=true;
+      renderRecScreen();
+      setMicStatus('Navigating…');
+      // Stop mic and execute
+      releaseMic();
+      S.isProcessing=false;
+      executeCommand();
+    } else if(S.isRecording){
+      startChunk(); // continue
+    }
+
+  }catch(e){
+    // Whisper failed — just continue recording
+    if(S.isRecording)startChunk();
+  }
+}
+
+async function finalSave(){
+  // Called on manual stop — process any remaining chunks
+  const blob=new Blob(mediaChunks,{type:recMime||'audio/webm'});
+  mediaChunks=[];
+  if(blob.size>800&&S.openaiKey&&S.openaiKey!=='skip'){
     try{
       const fd=new FormData();fd.append('audio',blob,'audio.webm');
       const res=await fetch('/api/transcribe',{method:'POST',headers:{'x-openai-key':S.openaiKey},body:fd});
       if(res.ok){
         const data=await res.json();
-        const said=(data.transcript||'').toLowerCase();
-        for(const cmd of VOICE_COMMANDS){
-          if(said.includes(cmd)){
-            pendingCommand=cmd;
-            triggerCommandStop();
-            return;
-          }
+        let t=(data.transcript||'').trim();
+        for(const cmd of VOICE_COMMANDS){t=t.replace(new RegExp(cmd+'[.,!?]?\\s*','gi'),'').trim();}
+        if(t){
+          allChunkText=allChunkText?allChunkText.trimEnd()+' '+t:t;
+          const sec=activeSections()[S.secIdx];
+          if(sec){S.transcripts[sec.id]=allChunkText;persistSession();}
         }
       }
     }catch(e){}
   }
-  // No command found — poll again
-  if(S.isRecording&&!pendingCommand)startCmdChunk();
-}
-
-function stopCommandPolling(){
-  clearTimeout(cmdPollTimer);cmdPollTimer=null;
-  if(cmdRec2){try{cmdRec2.stop();}catch(e){}cmdRec2=null;}
-  cmdChunks=[];
-}
-
-function triggerCommandStop(){
-  stopCommandPolling();
-  if(mediaRec&&mediaRec.state==='recording'){
-    S.isProcessing=true;
-    renderRecScreen();
-    setMicStatus('Processing…');
-    mediaRec.onstop=()=>whisperAndNavigate();
-    mediaRec.stop();
-  } else {
-    executeCommand();
-  }
+  releaseMic();
+  S.isProcessing=false;
+  renderRecScreen();
+  const ta=document.getElementById('transcriptEdit');
+  const sec=activeSections()[S.secIdx];
+  if(ta&&sec)ta.value=S.transcripts[sec.id]||'';
 }
 
 function stopRecording(){
   S.isRecording=false;
   pendingCommand=null;
-  stopCommandPolling();
+  clearTimeout(chunkTimer);chunkTimer=null;
   if(mediaRec&&mediaRec.state==='recording'){
     S.isProcessing=true;
     renderRecScreen();
-    mediaRec.onstop=()=>whisperAndSave();
+    // onstop will call processChunk → finalSave since isRecording is false
     mediaRec.stop();
   } else {
     releaseMic();
@@ -500,59 +547,9 @@ function stopRecording(){
 }
 
 function releaseMic(){
+  clearTimeout(chunkTimer);chunkTimer=null;
   if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}
   mediaRec=null;mediaChunks=[];
-}
-
-async function sendToWhisper(){
-  const blob=new Blob(mediaChunks,{type:recMime||'audio/webm'});
-  if(!S.openaiKey||S.openaiKey==='skip'||blob.size<1500)return null;
-  try{
-    const fd=new FormData();fd.append('audio',blob,'audio.webm');
-    const res=await fetch('/api/transcribe',{method:'POST',headers:{'x-openai-key':S.openaiKey},body:fd});
-    if(!res.ok)return null;
-    const data=await res.json();
-    let text=data.transcript||'';
-    // Strip command phrases Whisper may have captured
-    for(const cmd of VOICE_COMMANDS){
-      text=text.replace(new RegExp(cmd+'[.,!?]?','gi'),'').trim();
-    }
-    return text||null;
-  }catch(e){return null;}
-}
-
-async function whisperAndSave(){
-  const sec=activeSections()[S.secIdx];
-  if(sec){
-    const whisperText=await sendToWhisper();
-    if(whisperText){
-      const existing=S.transcripts[sec.id]||'';
-      S.transcripts[sec.id]=existing?existing.trimEnd()+'\n\n'+whisperText:whisperText;
-      persistSession();
-    }
-  }
-  releaseMic();
-  S.isProcessing=false;
-  renderRecScreen();
-  // Update textarea
-  const ta=document.getElementById('transcriptEdit');
-  if(ta&&sec)ta.value=S.transcripts[sec.id]||'';
-}
-
-async function whisperAndNavigate(){
-  // Save current section via Whisper first
-  const sec=activeSections()[S.secIdx];
-  if(sec){
-    const whisperText=await sendToWhisper();
-    if(whisperText){
-      const existing=S.transcripts[sec.id]||'';
-      S.transcripts[sec.id]=existing?existing.trimEnd()+'\n\n'+whisperText:whisperText;
-      persistSession();
-    }
-  }
-  releaseMic();
-  S.isProcessing=false;
-  executeCommand();
 }
 
 function speakSection(label){
@@ -581,12 +578,12 @@ function executeCommand(){
   persistSession();
   renderRecScreen();
 
-  // Announce section name
   const newSec=activeSections()[S.secIdx];
   if(newSec)speakSection(newSec.label);
 
-  // Auto-restart recording after announcement finishes
+  // Restart recording on new section after announcement
   if(S.isRecording){
+    allChunkText=S.transcripts[newSec?.id]||'';
     setTimeout(()=>startRecording(),1400);
   }
 }
